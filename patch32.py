@@ -22,7 +22,7 @@ class patch32_handler:
             self.patch_pie_elf()
         else:
             self.patch_nopie_elf()
-        sys.stdout = sys.__stdout__
+        sys.stdout = sys.__stdout
         self.elf.save(self.filename + '.patch')
         os.system('chmod +x ' + self.filename + '.patch')
         log.success('input file: ' + self.filename)
