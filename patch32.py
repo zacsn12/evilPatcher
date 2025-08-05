@@ -2,7 +2,7 @@ from pwn import *
 import sys
 import os
 from subprocess import getoutput  # Importing getoutput from subprocess
-
+import lief
 
 class patch32_handler:
     def __init__(self, filename, sandboxfile, debugFlag):
@@ -11,6 +11,7 @@ class patch32_handler:
         self.ct = self.make_sandbox(sandboxfile)
         self.elf = ELF(filename)
         self.debugFlag = debugFlag
+        self.oep = self.elf.header.e_entry
 
     def pr(self, a, addr):
         log.success(f'{a} ===> {hex(addr)}')
@@ -18,15 +19,15 @@ class patch32_handler:
     def run(self):
         if self.debugFlag == 0:
             sys.stdout = open(os.devnull, 'w')
-        if self.elf.pie:
-            self.patch_pie_elf()
-        else:
-            self.patch_nopie_elf()
-        sys.stdout = sys.__stdout
+        self.patch_elf()
+        sys.stdout = sys.__stdout__
         self.elf.save(self.filename + '.patch')
         os.system('chmod +x ' + self.filename + '.patch')
         log.success('input file: ' + self.filename)
         log.success('output file: ' + self.filename + '.patch')
+        patched_elf = lief.parse(self.filename + '.patch')
+        patched_elf.header.entrypoint = self.oep
+        patched_elf.write(self.filename + '.patch')
         print("File patched")
 
     def run_partial(self):
@@ -94,84 +95,74 @@ class patch32_handler:
                 self.elf.write(program_table_header_start + i * size_of_program_headers + 0x18, p32(5))
                 print(f'edit program_table_element[{i}].p_flags ===> r_x')
 
-    def patch_pie_elf(self):
-        eh_frame_addr = self.elf.get_section_by_name('.eh_frame').header.sh_addr
-        start_offset = self.elf.header.e_entry
-        got_start = 0
-        try:
-            got_start = self.elf.get_section_by_name('.got.plt').header.sh_addr
-        except Exception:
-            got_start = self.elf.get_section_by_name('.got').header.sh_addr
-        offset = self.elf.read(start_offset, 0x40).find(b'\x50\x51\x56')
-        offset1 = u32(self.elf.read(start_offset + offset + 3 + 2, 4))  # push DWORD PTR [ebx+offset1]
-        offset2 = got_start - eh_frame_addr
-        main_addr = u32(self.elf.read((got_start + offset1) & 0xffffffff, 4))
-        self.pr('eh_frame_addr', eh_frame_addr)
-        self.pr('got_start', got_start)
-        self.pr('main_addr', main_addr)
-        print('=================================edit _start==================================')
-        print('replace _start+' + hex(offset + 3) + '------>change __libc_start_main\'s first parameter: main->.eh_frame')
-        print(disasm(self.elf.read(start_offset + offset + 3, 6)))
-        s = asm(f'lea ecx,[ebx-{offset2}];push ecx;')
-        tmp = self.elf.read(start_offset + offset + 3 + 6, 5)
-        main_offset = u32(tmp[1:]) - 1
-        tmp = tmp[0:1] + p32(main_offset)
-        s += tmp
-        print('                ||               ')
-        print('                ||               ')
-        print('                \/               ')
-        print(disasm(s))
-        inject_code = self.inject_code_build()
-        tail = b'\xe9' + p32(0xffffffff & (main_addr - (eh_frame_addr + len(inject_code) + 5)))
-        inject_code += tail
-        print('============================inject code into .eh_frame========================')
-        print(disasm(inject_code))
-        print('.eh_frame.sh_size ===> ' + str(hex(self.elf.get_section_by_name('.eh_frame').header.sh_size)))
-        print('inject_code.length ===> ' + str(hex(len(inject_code))))
-        self.elf.write(start_offset + offset + 3, s)
-        self.elf.write(eh_frame_addr, inject_code)
-        self.edit_program_table_header()
-    def patch_nopie_elf(self):
+    # def patch_pie_elf(self):
+    #     eh_frame_addr = self.elf.get_section_by_name('.eh_frame').header.sh_addr
+    #     start_offset = self.elf.header.e_entry
+    #     got_start = 0
+    #     try:
+    #         got_start = self.elf.get_section_by_name('.got.plt').header.sh_addr
+    #     except Exception:
+    #         got_start = self.elf.get_section_by_name('.got').header.sh_addr
+    #     offset = self.elf.read(start_offset, 0x40).find(b'\x50\x51\x56')
+    #     offset1 = u32(self.elf.read(start_offset + offset + 3 + 2, 4))  # push DWORD PTR [ebx+offset1]
+    #     offset2 = got_start - eh_frame_addr
+    #     main_addr = u32(self.elf.read((got_start + offset1) & 0xffffffff, 4))
+    #     self.pr('eh_frame_addr', eh_frame_addr)
+    #     self.pr('got_start', got_start)
+    #     self.pr('main_addr', main_addr)
+    #     print('=================================edit _start==================================')
+    #     print('replace _start+' + hex(offset + 3) + '------>change __libc_start_main\'s first parameter: main->.eh_frame')
+    #     print(disasm(self.elf.read(start_offset + offset + 3, 6)))
+    #     s = asm(f'lea ecx,[ebx-{offset2}];push ecx;')
+    #     tmp = self.elf.read(start_offset + offset + 3 + 6, 5)
+    #     main_offset = u32(tmp[1:]) - 1
+    #     tmp = tmp[0:1] + p32(main_offset)
+    #     s += tmp
+    #     print('                ||               ')
+    #     print('                ||               ')
+    #     print('                \/               ')
+    #     print(disasm(s))
+    #     inject_code = self.inject_code_build()
+    #     tail = b'\xe9' + p32(0xffffffff & (main_addr - (eh_frame_addr + len(inject_code) + 5)))
+    #     inject_code += tail
+    #     print('============================inject code into .eh_frame========================')
+    #     print(disasm(inject_code))
+    #     print('.eh_frame.sh_size ===> ' + str(hex(self.elf.get_section_by_name('.eh_frame').header.sh_size)))
+    #     print('inject_code.length ===> ' + str(hex(len(inject_code))))
+    #     self.elf.write(start_offset + offset + 3, s)
+    #     self.elf.write(eh_frame_addr, inject_code)
+    #     self.edit_program_table_header()
+    def patch_elf(self):
         program_base = self.elf.address
         self.pr('program_base', program_base)
         eh_frame_addr = self.elf.get_section_by_name('.eh_frame').header.sh_addr
         start_offset = self.elf.header.e_entry
-        offset = self.elf.read(start_offset, 0x40).find(b'\x50\x51\x56')
-        main_addr = u32(self.elf.read(start_offset + offset + 5, 4))
-        # Maybe compiled by ubuntu16.04
-        if offset == -1:
-            offset = self.elf.read(start_offset, 0x30).find(b'\xf4') - 10  # hlt
-            main_addr = u32(self.elf.read(start_offset + offset + 1, 4))
-            self.pr('eh_frame_addr', eh_frame_addr)
-            self.pr('start_offset', start_offset)
-            self.pr('main_addr', main_addr)
-            print('=================================edit _start==================================')
-            print(f'replace _start+{hex(offset)} ------> change __libc_start_main\'s first parameter: main->.eh_frame')
-            print(disasm(self.elf.read(start_offset + offset, 5)))
-            s = asm(f'push {hex(eh_frame_addr)}')
-            print('                ||               ')
-            print('                ||               ')
-            print('                \/               ')
-            print(disasm(s))
-            self.elf.write(start_offset + offset, s)
-        else:
-            self.pr('eh_frame_addr', eh_frame_addr)
-            self.pr('start_offset', start_offset)
-            self.pr('main_addr', main_addr)
-            print('=================================edit _start==================================')
-            print(f'replace _start+{hex(offset + 3)} ------> change __libc_start_main\'s first parameter: main->.eh_frame')
-            print(disasm(self.elf.read(start_offset + offset + 3, 6)))
-            s = asm(f'mov eax, {hex(eh_frame_addr)}; nop;')
-            print('                ||               ')
-            print('                ||               ')
-            print('                \/               ')
-            print(disasm(s))
-            self.elf.write(start_offset + offset + 3, s)
+        # offset = self.elf.read(start_offset, 0x30).find(b'\xf4') - 10  # hlt
+        # main_addr = u32(self.elf.read(start_offset + offset, 4))
+        self.pr('eh_frame_addr', eh_frame_addr)
+        self.pr('start_offset', start_offset)
+        # self.pr('main_addr', main_addr)
+        print('=================================edit _start==================================')
+        # print(f'replace _start+{hex(offset)} ------> change __libc_start_main\'s first parameter: main->.eh_frame')
+        
+        # print(disasm(self.elf.read(start_offset + offset-2, 7)))
+        # self.elf.write(start_offset + offset, p32(eh_frame_addr))
+        # print('                ||               ')
+        # print('                ||               ')
+        # print('                \/               ')
+        # print(disasm(self.elf.read(start_offset + offset-2, 7)))    
+        print(f'replace _start ------> change  _start->.eh_frame')
+        self.oep = eh_frame_addr
+        
 
         # ===================sandbox rule==============
         inject_code = self.inject_code_build()
-        tail = asm(f'mov eax, {main_addr}; jmp eax;')
+        tail = asm('mov ebp, esp; pusha; pushf;')
+        inject_code = tail + inject_code
+        tail = asm('popf; popa; mov esp, ebp;')
         inject_code += tail
+        current_addr = eh_frame_addr + len(inject_code) + 5
+        inject_code += b'\xe9' + p32(0xffffffff & (start_offset - current_addr))
         print('==========================inject code into .eh_frame==========================')
         print(disasm(inject_code))
         print('.eh_frame.sh_size ===> ' + str(hex(self.elf.get_section_by_name('.eh_frame').header.sh_size)))
